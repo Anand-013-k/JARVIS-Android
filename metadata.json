@@ -1,0 +1,6 @@
+{
+  "name": "JARVIS AI Voice Assistant",
+  "description": "Futuristic dark-themed personal voice assistant for Android with open-ended intelligence, voice recognition, natural speech, and modular tool architecture.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
