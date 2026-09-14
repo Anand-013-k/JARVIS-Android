@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { JarvisPipelineStatus } from '../types/jarvis';
 import { getNativeJarvisBridge } from '../services/nativeBridge';
+import type { JarvisPipelineStatus } from '../types/jarvis';
+
+export type SpeechRecognitionMode = 'wake' | 'command';
 
 export interface DiagnosticEventLog {
   id: string;
@@ -13,69 +15,93 @@ export interface DiagnosticEventLog {
 export interface SpeechDiagnostics {
   hasSpeechRecognition: boolean;
   hasWebkitSpeechRecognition: boolean;
-  isWebSpeechUnavailable: boolean;
+  constructorUsed: string;
   micPermission: 'granted' | 'denied' | 'prompt' | 'unknown';
-  microphonePermission: 'granted' | 'denied' | 'prompt' | 'unknown';
+  isSecureContext: boolean;
+  isInIframe: boolean;
   exactError: string | null;
-  lastError: string | null;
-  lastErrorTime: string | null;
-  lastTranscript: string;
-  confidence: number | null;
-  secureContext: boolean;
-  userAgent: string;
-  events: DiagnosticEventLog[];
+
+  lastEvent: string;
+  lastEventTimestamp: number | null;
+  lastInterim: string;
+  lastFinal: string;
+
+  confidenceScore: number | null;
+  detectedLanguage: string | null;
+  zeroWordsCaptured: boolean;
+
+  isWebSpeechUnavailable: boolean;
+  unavailableReason: string | null;
+
+  eventCounts: {
+    onstart: number;
+    onaudiostart: number;
+    onsoundstart: number;
+    onspeechstart: number;
+    onresult: number;
+    onspeechend: number;
+    onsoundend: number;
+    onaudioend: number;
+    onerror: number;
+    onend: number;
+  };
+
+  eventLogs: DiagnosticEventLog[];
 }
 
-export interface UseSpeechRecognitionOptions {
-  wakeWordEnabled?: boolean;
-  isSpeaking?: boolean;
-  preferredInputDeviceId?: string | null;
-  apiUrl?: string;
-  onCommandListeningStart?: () => void;
-  onFinalTranscript?: (text: string) => void;
-  onWakeWordDetected?: (trailingCommand?: string) => void;
-  onPipelineTransition?: ( from: JarvisPipelineStatus, to: JarvisPipelineStatus, reason?: string, ) => void;
+type SpeechRecognitionConstructor = new () => SpeechRecognition;
+
+interface SpeechRecognitionEventMap {
+  result: SpeechRecognitionEvent;
+  error: SpeechRecognitionErrorEvent;
 }
 
-type RecognitionMode = 'wake' | 'command';
-
-interface RecognitionResultLike {
-  transcript?: string;
-  confidence?: number;
-}
-
-interface RecognitionEventLike {
-  resultIndex?: number;
-  results: ArrayLike<{
-    isFinal: boolean;
-    [index: number]: RecognitionResultLike;
-  }>;
-}
-
-interface RecognitionErrorEventLike {
-  error?: string;
-  message?: string;
-}
-
-interface SpeechRecognitionLike {
+interface SpeechRecognition {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
   maxAlternatives: number;
-  start: () => void;
-  stop: () => void;
-  abort: () => void;
+
+  start(): void;
+  stop(): void;
+  abort(): void;
+
   onstart: ((event: Event) => void) | null;
-  onend: ((event: Event) => void) | null;
-  onerror: ((event: RecognitionErrorEventLike) => void) | null;
-  onresult: ((event: RecognitionEventLike) => void) | null;
-  onnomatch: ((event: Event) => void) | null;
+  onaudiostart: ((event: Event) => void) | null;
+  onsoundstart: ((event: Event) => void) | null;
   onspeechstart: ((event: Event) => void) | null;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
   onspeechend: ((event: Event) => void) | null;
+  onsoundend: ((event: Event) => void) | null;
+  onaudioend: ((event: Event) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+  onend: ((event: Event) => void) | null;
 }
 
-interface SpeechRecognitionConstructor {
-  new (): SpeechRecognitionLike;
+interface SpeechRecognitionEvent extends Event {
+  resultIndex: number;
+  results: SpeechRecognitionResultList;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
+  message?: string;
+}
+
+interface SpeechRecognitionResultList {
+  readonly length: number;
+  [index: number]: SpeechRecognitionResult;
+}
+
+interface SpeechRecognitionResult {
+  readonly isFinal: boolean;
+  readonly length: number;
+  [index: number]: SpeechRecognitionAlternative;
+}
+
+interface SpeechRecognitionAlternative {
+  readonly transcript: string;
+  readonly confidence: number;
 }
 
 declare global {
@@ -85,42 +111,143 @@ declare global {
   }
 }
 
-const WAKE_PHRASES = [
-  'hey jarvis',
-  'okay jarvis',
-  'ok jarvis',
-  'hi jarvis',
-  'hello jarvis',
-];
+const WAKE_WORD_PATTERN =
+  /\b(?:hey|okay|ok|hi|hello)\s+jarvis\b/i;
 
-const normalizeText = (value: string): string =>
-  value
+function normalizeText(text: string): string {
+  return text
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/[^\w\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
 
-const containsWakeWord = (value: string): boolean => {
-  const normalized = normalizeText(value);
-  return WAKE_PHRASES.some((phrase) => normalized.includes(phrase));
+function containsWakeWord(text: string): boolean {
+  return WAKE_WORD_PATTERN.test(normalizeText(text));
+}
+
+function extractCommandAfterWakeWord(text: string): string {
+  const match = normalizeText(text).match(
+    /\b(?:hey|okay|ok|hi|hello)\s+jarvis\b(.*)$/i
+  );
+
+  return match?.[1]?.trim() ?? '';
+}
+
+function createEventId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+const initialEventCounts: SpeechDiagnostics['eventCounts'] = {
+  onstart: 0,
+  onaudiostart: 0,
+  onsoundstart: 0,
+  onspeechstart: 0,
+  onresult: 0,
+  onspeechend: 0,
+  onsoundend: 0,
+  onaudioend: 0,
+  onerror: 0,
+  onend: 0,
 };
 
-const removeWakeWord = (value: string): string => {
-  const normalized = normalizeText(value);
-  const phrase = WAKE_PHRASES.find((item) => normalized.includes(item));
+const initialDiagnostics: SpeechDiagnostics = {
+  hasSpeechRecognition: false,
+  hasWebkitSpeechRecognition: false,
+  constructorUsed: 'none',
+  micPermission: 'unknown',
+  isSecureContext: false,
+  isInIframe: false,
+  exactError: null,
 
-  if (!phrase) return '';
+  lastEvent: '',
+  lastEventTimestamp: null,
+  lastInterim: '',
+  lastFinal: '',
 
-  const normalizedIndex = normalized.indexOf(phrase);
-  const normalizedTail = normalized.slice(normalizedIndex + phrase.length);
+  confidenceScore: null,
+  detectedLanguage: null,
+  zeroWordsCaptured: false,
 
-  return normalizedTail.replace(/^[\s,!.?-]+/, '').trim();
+  isWebSpeechUnavailable: false,
+  unavailableReason: null,
+
+  eventCounts: initialEventCounts,
+  eventLogs: [],
 };
 
-const createEventId = () =>
-  `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+function getRecognitionConstructor(): SpeechRecognitionConstructor | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
 
-export function useSpeechRecognition( options: UseSpeechRecognitionOptions = {}, ) {
+  return (
+    window.SpeechRecognition ??
+    window.webkitSpeechRecognition ??
+    null
+  );
+}
+
+function getConstructorName(): string {
+  if (typeof window === 'undefined') {
+    return 'none';
+  }
+
+  if (window.SpeechRecognition) {
+    return 'SpeechRecognition';
+  }
+
+  if (window.webkitSpeechRecognition) {
+    return 'webkitSpeechRecognition';
+  }
+
+  return 'none';
+}
+
+function getInitialDiagnostics(): SpeechDiagnostics {
+  const constructor = getRecognitionConstructor();
+
+  return {
+    ...initialDiagnostics,
+    hasSpeechRecognition: Boolean(constructor),
+    hasWebkitSpeechRecognition: Boolean(
+      typeof window !== 'undefined' &&
+      window.webkitSpeechRecognition
+    ),
+    constructorUsed: getConstructorName(),
+    isSecureContext:
+      typeof window !== 'undefined'
+        ? window.isSecureContext
+        : false,
+    isInIframe:
+      typeof window !== 'undefined'
+        ? window.self !== window.top
+        : false,
+    isWebSpeechUnavailable: !constructor,
+    unavailableReason: constructor
+      ? null
+      : 'Web Speech API is unavailable on this device.',
+    eventCounts: { ...initialEventCounts },
+    eventLogs: [],
+  };
+}
+export interface UseSpeechRecognitionOptions {
+  wakeWordEnabled?: boolean;
+  isSpeaking?: boolean;
+  preferredInputDeviceId?: string | null;
+
+  onCommandListeningStart?: () => void;
+  onFinalTranscript?: (text: string) => void;
+  onWakeWordDetected?: (trailingCommand?: string) => void;
+  onPipelineTransition?: (
+    from: JarvisPipelineStatus,
+    to: JarvisPipelineStatus,
+    reason?: string,
+  ) => void;
+}
+
+export function useSpeechRecognition(
+  options: UseSpeechRecognitionOptions = {},
+) {
   const {
     wakeWordEnabled = true,
     isSpeaking = false,
@@ -133,64 +260,50 @@ export function useSpeechRecognition( options: UseSpeechRecognitionOptions = {},
 
   const native = getNativeJarvisBridge();
 
-  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
   const sessionIdRef = useRef(0);
   const mountedRef = useRef(true);
   const restartTimerRef = useRef<number | null>(null);
 
-  const modeRef = useRef<RecognitionMode>('wake');
+  const modeRef = useRef<SpeechRecognitionMode>('wake');
   const wakeWordEnabledRef = useRef(wakeWordEnabled);
   const explicitStopRef = useRef(false);
+
   const onFinalTranscriptRef = useRef(onFinalTranscript);
   const onWakeWordDetectedRef = useRef(onWakeWordDetected);
   const onPipelineTransitionRef = useRef(onPipelineTransition);
-  const onCommandListeningStartRef = useRef(onCommandListeningStart);
+  const onCommandListeningStartRef = useRef(
+    onCommandListeningStart,
+  );
+
   const previousPipelineRef = useRef<JarvisPipelineStatus>('STANDBY');
 
   const [isListening, setIsListening] = useState(false);
-  const [commandListeningActive, setCommandListeningActive] = useState(false);
+  const [commandListeningActive, setCommandListeningActive] =
+    useState(false);
   const [transcript, setTranscript] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
-  const [activeMode, setActiveModeState] = useState<RecognitionMode>('wake');
-  const [isWakeWordStandby, setIsWakeWordStandby] = useState(false);
-  const [isTranscribingFallback, setIsTranscribingFallback] = useState(false);
+
+  const [activeMode, setActiveModeState] =
+    useState<SpeechRecognitionMode>('wake');
+
+  const [isWakeWordStandby, setIsWakeWordStandby] =
+    useState(false);
+
+  const [isTranscribingFallback, setIsTranscribingFallback] =
+    useState(false);
+
   const [pipelineStatus, setPipelineStatus] =
     useState<JarvisPipelineStatus>('STANDBY');
 
-  const [diagnosticLogs, setDiagnosticLogs] = useState<DiagnosticEventLog[]>([]);
-  const [speechDiagnostics, setSpeechDiagnostics] = useState<SpeechDiagnostics>(() => ({
-    hasSpeechRecognition:
-      typeof window !== 'undefined' &&
-      !!(window.SpeechRecognition || window.webkitSpeechRecognition),
-    hasWebkitSpeechRecognition:
-      typeof window !== 'undefined' && !!window.webkitSpeechRecognition,
-    isWebSpeechUnavailable:
-      typeof window === 'undefined' ||
-      !(window.SpeechRecognition || window.webkitSpeechRecognition),
-    micPermission: 'unknown',
-    microphonePermission: 'unknown',
-    exactError: null,
-    lastError: null,
-    lastErrorTime: null,
-    lastTranscript: '',
-    confidence: null,
-    secureContext:
-      typeof window !== 'undefined' ? window.isSecureContext : false,
-    userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
-    events: [],
-  }));
+  const [diagnosticLogs, setDiagnosticLogs] = useState<
+    DiagnosticEventLog[]
+  >([]);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      if (restartTimerRef.current !== null) {
-        window.clearTimeout(restartTimerRef.current);
-      }
-    };
-  }, []);
+  const [speechDiagnostics, setSpeechDiagnostics] =
+    useState<SpeechDiagnostics>(() => getInitialDiagnostics());
 
   useEffect(() => {
     wakeWordEnabledRef.current = wakeWordEnabled;
@@ -198,685 +311,414 @@ export function useSpeechRecognition( options: UseSpeechRecognitionOptions = {},
 
   useEffect(() => {
     onFinalTranscriptRef.current = onFinalTranscript;
-  }, [onFinalTranscript]);
-
-  useEffect(() => {
     onWakeWordDetectedRef.current = onWakeWordDetected;
-  }, [onWakeWordDetected]);
-
-  useEffect(() => {
     onPipelineTransitionRef.current = onPipelineTransition;
-  }, [onPipelineTransition]);
+    onCommandListeningStartRef.current = onCommandListeningStart;
+  }, [
+    onFinalTranscript,
+    onWakeWordDetected,
+    onPipelineTransition,
+    onCommandListeningStart,
+  ]);
 
   useEffect(() => {
-    onCommandListeningStartRef.current = onCommandListeningStart;
-  }, [onCommandListeningStart]);
+    mountedRef.current = true;
 
-  const logTelemetry = useCallback(
-    ( message: string, level: DiagnosticEventLog['level'] = 'info', details = '', ) => {
-      if (!mountedRef.current) return;
+    return () => {
+      mountedRef.current = false;
 
+      if (restartTimerRef.current !== null) {
+        window.clearTimeout(restartTimerRef.current);
+        restartTimerRef.current = null;
+      }
+
+      try {
+        recognitionRef.current?.abort();
+      } catch {
+        // Ignore cleanup errors.
+      }
+
+      recognitionRef.current = null;
+    };
+  }, []);
+    const logDiagnostic = useCallback(
+    (
+      event: string,
+      details: string,
+      level: DiagnosticEventLog['level'] = 'info',
+    ) => {
       const entry: DiagnosticEventLog = {
         id: createEventId(),
-        time: new Date().toISOString(),
-        event: message,
+        time: new Date().toLocaleTimeString(),
+        event,
         details,
         level,
       };
 
-      setDiagnosticLogs((previous) => [...previous, entry].slice(-100));
-      setSpeechDiagnostics((previous) => ({
-        ...previous,
-        events: [...previous.events, entry].slice(-100),
+      setDiagnosticLogs(prev => [
+        ...prev.slice(-99),
+        entry,
+      ]);
+
+      setSpeechDiagnostics(prev => ({
+        ...prev,
+        lastEvent: event,
+        lastEventTimestamp: Date.now(),
+        eventLogs: [
+          ...prev.eventLogs.slice(-99),
+          entry,
+        ],
       }));
     },
     [],
   );
 
-  const emitPipelineTransition = useCallback(
-    ( fromOrTo: JarvisPipelineStatus, toOrReason?: JarvisPipelineStatus, reason = '', ) => {
-      if (!mountedRef.current) return;
+  const incrementEvent = useCallback(
+    (
+      event: keyof SpeechDiagnostics['eventCounts'],
+    ) => {
+      setSpeechDiagnostics(prev => ({
+        ...prev,
+        eventCounts: {
+          ...prev.eventCounts,
+          [event]: prev.eventCounts[event] + 1,
+        },
+        lastEvent: event,
+        lastEventTimestamp: Date.now(),
+      }));
+    },
+    [],
+  );
 
-      const from =
-        toOrReason !== undefined
-          ? fromOrTo
-          : previousPipelineRef.current;
+  const transitionPipeline = useCallback(
+    (
+      next: JarvisPipelineStatus,
+      reason?: string,
+    ) => {
+      const previous = previousPipelineRef.current;
 
-      const to =
-        toOrReason !== undefined
-          ? toOrReason
-          : fromOrTo;
+      if (previous === next) {
+        return;
+      }
 
-      previousPipelineRef.current = to;
-      setPipelineStatus(to);
+      previousPipelineRef.current = next;
+      setPipelineStatus(next);
 
-      onPipelineTransitionRef.current?.(from, to, reason);
-      logTelemetry(
-        'PIPELINE',
-        to === 'STANDBY' ? 'info' : 'success',
-        reason || `${from} → ${to}`,
+      onPipelineTransitionRef.current?.(
+        previous,
+        next,
+        reason,
+      );
+
+      logDiagnostic(
+        'pipeline',
+        `${previous} → ${next}${
+          reason ? ` (${reason})` : ''
+        }`,
+        'info',
       );
     },
-    [logTelemetry],
+    [logDiagnostic],
+  );
+
+  const updateDiagnostics = useCallback(
+    (patch: Partial<SpeechDiagnostics>) => {
+      setSpeechDiagnostics(prev => ({
+        ...prev,
+        ...patch,
+      }));
+    },
+    [],
   );
 
   const clearError = useCallback(() => {
     setError(null);
-    setSpeechDiagnostics((previous) => ({
-      ...previous,
+
+    updateDiagnostics({
       exactError: null,
-      lastError: null,
-      lastErrorTime: null,
-    }));
-  }, []);
+      zeroWordsCaptured: false,
+    });
+  }, [updateDiagnostics]);
 
   const clearDiagnosticLogs = useCallback(() => {
     setDiagnosticLogs([]);
-    setSpeechDiagnostics((previous) => ({ ...previous, events: [] }));
+
+    setSpeechDiagnostics(prev => ({
+      ...prev,
+      eventLogs: [],
+      eventCounts: {
+        ...initialEventCounts,
+      },
+    }));
   }, []);
 
   const setActiveMode = useCallback(
-    (mode: RecognitionMode) => {
+    (mode: SpeechRecognitionMode) => {
       modeRef.current = mode;
       setActiveModeState(mode);
-      setCommandListeningActive(mode === 'command');
-      logTelemetry(
-        'MODE_CHANGED',
-        'info',
+
+      logDiagnostic(
+        'mode-change',
         `Recognition mode changed to ${mode}.`,
+        'info',
       );
     },
-    [logTelemetry],
+    [logDiagnostic],
   );
 
-  const getSpeechRecognitionConstructor = useCallback(() => {
-    if (typeof window === 'undefined') return null;
-    return window.SpeechRecognition || window.webkitSpeechRecognition || null;
-  }, []);
-
-  const destroyRecognition = useCallback(() => {
-    const recognition = recognitionRef.current;
-    recognitionRef.current = null;
-
-    if (!recognition) return;
-
-    try {
-      recognition.onstart = null;
-      recognition.onend = null;
-      recognition.onerror = null;
-      recognition.onresult = null;
-      recognition.onnomatch = null;
-      recognition.onspeechstart = null;
-      recognition.onspeechend = null;
-      recognition.abort();
-    } catch {
-      // Ignore cleanup failures.
-    }
-  }, []);
-
-  const checkMicrophonePermission = useCallback(async (): Promise<boolean> => {
-    if (native) {
-      try {
-        const permission = native.hasMicrophonePermission();
-
-        if (permission === true) {
-          setSpeechDiagnostics((previous) => ({
-            ...previous,
-            micPermission: 'granted',
-            microphonePermission: 'granted',
-          }));
-          return true;
-        }
-
-        if (permission === false) {
-          setSpeechDiagnostics((previous) => ({
-            ...previous,
-            micPermission: 'denied',
-            microphonePermission: 'denied',
-          }));
-          return false;
-        }
-      } catch {
-        // Fall through to browser permission handling.
-      }
-    }
-
-    if (
-      typeof navigator === 'undefined' ||
-      !navigator.mediaDevices?.getUserMedia
-    ) {
-      return false;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: preferredInputDeviceId
-          ? { deviceId: { exact: preferredInputDeviceId } }
-          : true,
-      });
-
-      stream.getTracks().forEach((track) => track.stop());
-
-      setSpeechDiagnostics((previous) => ({
-        ...previous,
-        micPermission: 'granted',
-        microphonePermission: 'granted',
-      }));
-
-      return true;
-    } catch (permissionError) {
-      const message = String(permissionError);
-
-      setSpeechDiagnostics((previous) => ({
-        ...previous,
-        micPermission: 'denied',
-        microphonePermission: 'denied',
-        exactError: message,
-        lastError: message,
-        lastErrorTime: new Date().toISOString(),
-      }));
-
-      return false;
-    }
-  }, [native, preferredInputDeviceId]);
-
-  const stopListening = useCallback(() => {
-    explicitStopRef.current = true;
-    sessionIdRef.current += 1;
-
+  const stopRecognitionInternal = useCallback(() => {
     if (restartTimerRef.current !== null) {
-      window.clearTimeout(restartTimerRef.current);
+      window.clearTimeout(
+        restartTimerRef.current,
+      );
       restartTimerRef.current = null;
     }
 
-    destroyRecognition();
+    const recognizer = recognitionRef.current;
 
-    if (native) {
+    recognitionRef.current = null;
+
+    if (recognizer) {
       try {
-        native.stop();
+        recognizer.abort();
       } catch {
-        // Ignore native stop failures.
+        // Ignore cleanup errors.
       }
     }
 
     setIsListening(false);
     setCommandListeningActive(false);
-    setIsWakeWordStandby(false);
-    setIsTranscribingFallback(false);
     setAudioLevel(0);
-    emitPipelineTransition(
-      pipelineStatus,
-      'STANDBY',
-      'Speech recognition stopped.',
-    );
-  }, [destroyRecognition, emitPipelineTransition, native, pipelineStatus]);
-
-  const handleWakeWord = useCallback(
-    (spokenText: string) => {
-      if (!containsWakeWord(spokenText)) return false;
-
-      const trailingCommand = removeWakeWord(spokenText);
-
-      setIsWakeWordStandby(false);
-      setCommandListeningActive(true);
-      setActiveModeState('command');
-      modeRef.current = 'command';
-
-      emitPipelineTransition(
-        'STANDBY',
-        'WAKE_DETECTED',
-        'Hey JARVIS detected.',
-      );
-
-      onWakeWordDetectedRef.current?.(trailingCommand || undefined);
-
-      if (trailingCommand) {
-        setTranscript(trailingCommand);
-        setInterimTranscript('');
-        emitPipelineTransition(
-          'WAKE_DETECTED',
-          'LISTENING',
-          'Command detected with wake phrase.',
-        );
-        onFinalTranscriptRef.current?.(trailingCommand);
-      } else {
-        emitPipelineTransition(
-          'WAKE_DETECTED',
-          'LISTENING',
-          'Listening for command.',
-        );
-        onCommandListeningStartRef.current?.();
-      }
-
-      return true;
-    },
-    [emitPipelineTransition],
-  );
-
-  const startNativeSession = useCallback(
-    (mode: RecognitionMode) => {
-      if (!native) return false;
-
-      explicitStopRef.current = false;
-      modeRef.current = mode;
-      setActiveModeState(mode);
-      setIsListening(true);
-      setError(null);
-      setAudioLevel(0);
-
-      if (mode === 'wake') {
-        setIsWakeWordStandby(true);
-        setCommandListeningActive(false);
-        emitPipelineTransition(
-          'STANDBY',
-          'STANDBY',
-          'Starting Android wake-word standby.',
-        );
-      } else {
-        setIsWakeWordStandby(false);
-        setCommandListeningActive(true);
-        emitPipelineTransition(
-          pipelineStatus,
-          'LISTENING',
-          'Starting Android command listening.',
-        );
-        onCommandListeningStartRef.current?.();
+  }, []);
+    const getPermissionState = useCallback(
+    async (): Promise<
+      'granted' | 'denied' | 'prompt' | 'unknown'
+    > => {
+      if (typeof navigator === 'undefined') {
+        return 'unknown';
       }
 
       try {
-        native.start(mode);
-        logTelemetry(
-          'NATIVE_START',
-          'success',
-          `Android native speech session started in ${mode} mode.`,
-        );
-        return true;
-      } catch (nativeError) {
-        const message = String(nativeError);
-        setError(message);
-        setSpeechDiagnostics((previous) => ({
-          ...previous,
-          exactError: message,
-          lastError: message,
-          lastErrorTime: new Date().toISOString(),
-        }));
-        emitPipelineTransition(
-          pipelineStatus,
-          'STANDBY',
-          message,
-        );
-        setIsListening(false);
-        return false;
+        if (navigator.permissions?.query) {
+          const permission =
+            await navigator.permissions.query({
+              name: 'microphone' as PermissionName,
+            });
+
+          if (permission.state === 'granted') {
+            return 'granted';
+          }
+
+          if (permission.state === 'denied') {
+            return 'denied';
+          }
+
+          return 'prompt';
+        }
+      } catch {
+        // Some Android WebViews do not expose
+        // microphone permission through Permissions API.
       }
+
+      if (native) {
+        try {
+          const granted =
+            native.hasMicrophonePermission();
+
+          if (granted === true) {
+            return 'granted';
+          }
+
+          if (granted === false) {
+            return 'denied';
+          }
+        } catch {
+          // Fall through to unknown.
+        }
+      }
+
+      return 'unknown';
     },
-    [emitPipelineTransition, logTelemetry, native, pipelineStatus],
+    [native],
   );
 
-  const startWebRecognition = useCallback(
-    async (mode: RecognitionMode): Promise<boolean> => {
-      const Constructor = getSpeechRecognitionConstructor();
+  const refreshPermissionState = useCallback(
+    async () => {
+      const permission =
+        await getPermissionState();
 
-      if (!Constructor) {
-        const message =
-          'Speech recognition is not available on this device.';
+      updateDiagnostics({
+        micPermission: permission,
+      });
 
-        setError(message);
-        setSpeechDiagnostics((previous) => ({
-          ...previous,
-          isWebSpeechUnavailable: true,
-          exactError: message,
-          lastError: message,
-          lastErrorTime: new Date().toISOString(),
-        }));
-        emitPipelineTransition(
-          pipelineStatus,
-          'STANDBY',
-          message,
-        );
-        return false;
-      }
-
-      const permissionGranted = await checkMicrophonePermission();
-
-      if (!permissionGranted) {
-        const message =
-          'Microphone permission is required for JARVIS voice control.';
-
-        setError(message);
-        setSpeechDiagnostics((previous) => ({
-          ...previous,
-          exactError: message,
-          lastError: message,
-          lastErrorTime: new Date().toISOString(),
-        }));
-        emitPipelineTransition(
-          pipelineStatus,
-          'STANDBY',
-          message,
-        );
-        return false;
-      }
-
-      explicitStopRef.current = false;
-      const sessionId = ++sessionIdRef.current;
-
-      destroyRecognition();
-
-      modeRef.current = mode;
-      setActiveModeState(mode);
-      setIsListening(true);
-      setCommandListeningActive(mode === 'command');
-      setIsWakeWordStandby(mode === 'wake');
-      setTranscript('');
-      setInterimTranscript('');
-      setError(null);
-      setAudioLevel(0);
-
-      emitPipelineTransition(
-        pipelineStatus,
-        mode === 'wake' ? 'STANDBY' : 'LISTENING',
-        mode === 'wake'
-          ? 'Web speech wake-word standby started.'
-          : 'Web speech command listening started.',
+      logDiagnostic(
+        'microphone-permission',
+        `Microphone permission: ${permission}.`,
+        permission === 'granted'
+          ? 'success'
+          : permission === 'denied'
+            ? 'error'
+            : 'info',
       );
 
-      if (mode === 'command') {
-        onCommandListeningStartRef.current?.();
+      return permission;
+    },
+    [
+      getPermissionState,
+      updateDiagnostics,
+      logDiagnostic,
+    ],
+  );
+
+  const scheduleRestart = useCallback(
+    (delay = 350) => {
+      if (explicitStopRef.current) {
+        return;
       }
 
-      const recognition = new Constructor();
-      recognitionRef.current = recognition;
+      if (!wakeWordEnabledRef.current) {
+        return;
+      }
 
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
-      recognition.maxAlternatives = 3;
+      if (isSpeaking) {
+        return;
+      }
 
-      recognition.onstart = () => {
-        if (sessionId !== sessionIdRef.current) return;
-        setIsListening(true);
-        logTelemetry(
-          'RECOGNITION_START',
-          'success',
-          `Web recognition started in ${mode} mode.`,
+      if (restartTimerRef.current !== null) {
+        window.clearTimeout(
+          restartTimerRef.current,
         );
-      };
+      }
 
-      recognition.onresult = (event) => {
-        if (sessionId !== sessionIdRef.current) return;
-
-        let finalText = '';
-        let interimText = '';
-
-        for (
-          let index = event.resultIndex || 0;
-          index < event.results.length;
-          index += 1
-        ) {
-          const result = event.results[index];
-          if (!result?.[0]) continue;
-
-          const text = result[0].transcript || '';
-
-          if (result.isFinal) {
-            finalText += ` ${text}`;
-            setSpeechDiagnostics((previous) => ({
-              ...previous,
-              confidence:
-                typeof result[0].confidence === 'number'
-                  ? result[0].confidence
-                  : null,
-              lastTranscript: text,
-            }));
-          } else {
-            interimText += ` ${text}`;
-          }
-        }
-
-        finalText = normalizeText(finalText);
-        interimText = normalizeText(interimText);
-
-        if (interimText) {
-          setInterimTranscript(interimText);
-          setAudioLevel(Math.min(1, Math.max(0.15, interimText.length / 40)));
+      restartTimerRef.current =
+        window.setTimeout(() => {
+          restartTimerRef.current = null;
 
           if (
-            modeRef.current === 'wake' &&
-            containsWakeWord(interimText)
+            explicitStopRef.current ||
+            !wakeWordEnabledRef.current ||
+            isSpeaking ||
+            !mountedRef.current
           ) {
-            handleWakeWord(interimText);
+            return;
           }
-        }
 
-        if (!finalText) return;
+          startRecognition();
+        }, delay);
+    },
+    [isSpeaking],
+  );
+    const createRecognizer = useCallback(
+    (): SpeechRecognition | null => {
+      const Constructor =
+        getRecognitionConstructor();
 
-        setTranscript(finalText);
-        setInterimTranscript('');
-        setAudioLevel(0);
+      if (!Constructor) {
+        updateDiagnostics({
+          hasSpeechRecognition: false,
+          isWebSpeechUnavailable: true,
+          unavailableReason:
+            'Web Speech API is unavailable on this device.',
+          constructorUsed: 'none',
+        });
 
-        if (modeRef.current === 'wake') {
-          handleWakeWord(finalText);
+        return null;
+      }
+
+      const recognizer = new Constructor();
+
+      recognizer.continuous = false;
+      recognizer.interimResults = true;
+      recognizer.lang = 'en-US';
+      recognizer.maxAlternatives = 3;
+
+      updateDiagnostics({
+        hasSpeechRecognition: true,
+        hasWebkitSpeechRecognition:
+          typeof window !== 'undefined' &&
+          Boolean(window.webkitSpeechRecognition),
+        constructorUsed: getConstructorName(),
+        isWebSpeechUnavailable: false,
+        unavailableReason: null,
+        isSecureContext:
+          typeof window !== 'undefined'
+            ? window.isSecureContext
+            : false,
+        isInIframe:
+          typeof window !== 'undefined'
+            ? window.self !== window.top
+            : false,
+      });
+
+      return recognizer;
+    },
+    [updateDiagnostics],
+  );
+
+  const handleFinalResult = useCallback(
+    (text: string) => {
+      const cleanText = text.trim();
+
+      if (!cleanText) {
+        updateDiagnostics({
+          zeroWordsCaptured: true,
+        });
+
+        return;
+      }
+
+      setTranscript(cleanText);
+
+      updateDiagnostics({
+        lastFinal: cleanText,
+        confidenceScore:
+          speechDiagnostics.confidenceScore,
+        zeroWordsCaptured: false,
+      });
+
+      logDiagnostic(
+        'final-transcript',
+        cleanText,
+        'success',
+      );
+
+      if (modeRef.current === 'wake') {
+        if (!wakeWordEnabledRef.current) {
           return;
         }
 
-        emitPipelineTransition(
-          'LISTENING',
-          'LISTENING',
-          'Final command received.',
-        );
-        onFinalTranscriptRef.current?.(finalText);
-      };
-
-      recognition.onerror = (event) => {
-        if (sessionId !== sessionIdRef.current) return;
-
-        const code = event.error || 'unknown';
-        const message =
-          event.message || `Speech recognition error: ${code}`;
-
-        setSpeechDiagnostics((previous) => ({
-          ...previous,
-          exactError: message,
-          lastError: message,
-          lastErrorTime: new Date().toISOString(),
-        }));
-
-        logTelemetry(
-          'RECOGNITION_ERROR',
-          code === 'no-speech' ? 'warn' : 'error',
-          `${code}: ${message}`,
-        );
-
-        if (code === 'not-allowed' || code === 'service-not-allowed') {
-          setError(
-            'Microphone permission was denied or speech recognition is blocked.',
-          );
-          setSpeechDiagnostics((previous) => ({
-            ...previous,
-            micPermission: 'denied',
-            microphonePermission: 'denied',
-          }));
-          emitPipelineTransition(
-            pipelineStatus,
-            'STANDBY',
-            message,
-          );
+        if (!containsWakeWord(cleanText)) {
+          return;
         }
-      };
 
-      recognition.onend = () => {
-        if (sessionId !== sessionIdRef.current) return;
+        const trailingCommand =
+          extractCommandAfterWakeWord(cleanText);
 
-        recognitionRef.current = null;
-        setAudioLevel(0);
+        transitionPipeline(
+          'WAKE_DETECTED',
+          'Wake phrase recognized.',
+        );
 
-        if (explicitStopRef.current || isSpeaking) return;
+        setIsWakeWordStandby(false);
 
-        if (modeRef.  }, [isListening, startListening, stopListening]);
+        onWakeWordDetectedRef.current?.(
+          trailingCommand || undefined,
+        );
 
-  const triggerWakeWordTest = useCallback(() => {
-    setIsWakeWordStandby(false);
-    emitPipelineTransition(
-      'STANDBY',
-      'WAKE_DETECTED',
-      'Manual wake-word test.',
+        if (trailingCommand) {
+          onFinalTranscriptRef.current?.(
+            cleanText,
+         );  
+       },
+       [
+          logDiagnostic,
+
+speechDiagnostics.confidenceScore,
+         transitionPipeline,
+         updateDiagnostics,
+       ],
     );
-    onWakeWordDetectedRef.current?.();
-  }, [emitPipelineTransition]);
 
-  useEffect(() => {
-    if (!native) return;
 
-    const removeListener = native.onEvent((event) => {
-      if (!mountedRef.current) return;
-
-      switch (event.type) {
-        case 'wake':
-          modeRef.current = 'command';
-          setActiveModeState('command');
-          setIsListening(true);
-          setIsWakeWordStandby(false);
-          setCommandListeningActive(true);
-          setTranscript('');
-          setInterimTranscript('');
-
-          emitPipelineTransition(
-            'STANDBY',
-            'WAKE_DETECTED',
-            'Android detected Hey JARVIS.',
-          );
-
-          onWakeWordDetectedRef.current?.();
-          onCommandListeningStartRef.current?.();
-
-          emitPipelineTransition(
-            'WAKE_DETECTED',
-            'LISTENING',
-            'Listening for command.',
-          );
-          break;
-
-        case 'partial':
-          setInterimTranscript(normalizeText(event.text));
-          setAudioLevel(0.55);
-          break;
-
-        case 'command': {
-          const command = normalizeText(event.text);
-          if (!command) break;
-
-          setTranscript(command);
-          setInterimTranscript('');
-          setAudioLevel(0);
-          setIsListening(true);
-          setCommandListeningActive(true);
-          modeRef.current = 'command';
-          setActiveModeState('command');
-
-          emitPipelineTransition(
-            'LISTENING',
-            'LISTENING',
-            'Android native command received.',
-          );
-
-          onFinalTranscriptRef.current?.(command);
-          break;
-        }
-
-        case 'error': {
-          const message =
-            event.text || 'Android speech recognition failed.';
-
-          setError(message);
-          setSpeechDiagnostics((previous) => ({
-            ...previous,
-            exactError: message,
-            lastError: message,
-            lastErrorTime: new Date().toISOString(),
-          }));
-
-          emitPipelineTransition(
-            pipelineStatus,
-            'STANDBY',
-            message,
-          );
-          break;
-        }
-
-        case 'microphone-granted':
-          setSpeechDiagnostics((previous) => ({
-            ...previous,
-            micPermission: 'granted',
-            microphonePermission: 'granted',
-            exactError: null,
-            lastError: null,
-            lastErrorTime: null,
-          }));
-          setError(null);
-          break;
-
-        case 'microphone-denied': {
-          const message =
-            event.text || 'Android microphone permission was denied.';
-
-          setSpeechDiagnostics((previous) => ({
-            ...previous,
-            micPermission: 'denied',
-            microphonePermission: 'denied',
-            exactError: message,
-            lastError: message,
-            lastErrorTime: new Date().toISOString(),
-          }));
-
-          setError(message);
-          emitPipelineTransition(
-            pipelineStatus,
-            'STANDBY',
-            message,
-          );
-          break;
-        }
-
-        default:
-          break;
-      }
-    });
-
-    return removeListener;
-  }, [emitPipelineTransition, native, pipelineStatus]);
-
-  useEffect(() => {
-    if (wakeWordEnabled && !isListening && !explicitStopRef.current) {
-      setIsWakeWordStandby(false);
-    }
-  }, [isListening, wakeWordEnabled]);
-
-  const isSupported =
-    !!native || !!getSpeechRecognitionConstructor();
-
-  return {
-    isListening,
-    commandListeningActive,
-    transcript,
-    interimTranscript,
-    isSupported,
-    error,
-    clearError,
-    audioLevel,
-    activeMode,
-    setActiveMode,
-    isTranscribingFallback,
-    speechDiagnostics,
-    diagnosticLogs,
-    clearDiagnosticLogs,
-    startListening,
-    stopListening,
-    toggleListening,
-    resumeWakeWordStandby,
-    isWakeWordStandby,
-    pipelineStatus,
-    logTelemetry,
-    emitPipelineTransition,
-    triggerWakeWordTest,
-  };
-      }
+         
+           
