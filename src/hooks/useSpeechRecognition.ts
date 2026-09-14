@@ -705,7 +705,7 @@ export function useSpeechRecognition(
           trailingCommand || undefined,
         );
 
-                if (trailingCommand) {
+                        if (trailingCommand) {
           onFinalTranscriptRef.current?.(
             trailingCommand,
           );
@@ -730,6 +730,4 @@ export function useSpeechRecognition(
       updateDiagnostics,
     ],
   );
-
-         
            
