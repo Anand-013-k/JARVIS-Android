@@ -16,6 +16,7 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
 import android.widget.TextView;
 
 public class MainActivity extends Activity {
@@ -24,6 +25,9 @@ public class MainActivity extends Activity {
     private TextView errorView;
 
     private static MainActivity instance;
+
+    // Stores the WebView microphone request while Android asks for permission.
+    private PermissionRequest pendingPermissionRequest;
 
     public static MainActivity getInstance() {
         return instance;
@@ -35,14 +39,11 @@ public class MainActivity extends Activity {
 
         instance = this;
 
-        // Enable WebView debugging
         WebView.setWebContentsDebuggingEnabled(true);
 
-        // Root container
-        android.widget.FrameLayout root = new android.widget.FrameLayout(this);
+        FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(4, 7, 14));
 
-        // WebView
         web = new WebView(this);
 
         WebSettings settings = web.getSettings();
@@ -52,30 +53,34 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
 
-        // Allow the bundled React/Vite assets to load
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
         settings.setAllowFileAccessFromFileURLs(true);
         settings.setAllowUniversalAccessFromFileURLs(true);
 
-        // Better compatibility with React applications
         settings.setJavaScriptCanOpenWindowsAutomatically(true);
         settings.setLoadsImagesAutomatically(true);
 
-        // Add Android bridge
-        web.addJavascriptInterface(new AndroidBridge(), "JARVIS_ANDROID");
+        // Android <-> JavaScript bridge
+        web.addJavascriptInterface(
+                new AndroidBridge(),
+                "JARVIS_ANDROID"
+        );
 
-        // WebView client
         web.setWebViewClient(new WebViewClient() {
 
             @Override
-            public void onPageFinished(WebView view, String url) {
+            public void onPageFinished(
+                    WebView view,
+                    String url
+            ) {
                 super.onPageFinished(view, url);
 
-                // Tell the React application that Android is ready
                 view.evaluateJavascript(
-                    "window.dispatchEvent(new CustomEvent('jarvis-android-ready'));",
-                    null
+                        "window.dispatchEvent(" +
+                        "new CustomEvent('jarvis-android-ready')" +
+                        ");",
+                        null
                 );
             }
 
@@ -83,13 +88,15 @@ public class MainActivity extends Activity {
             public void onReceivedError(
                     WebView view,
                     WebResourceRequest request,
-                    WebResourceError error) {
-
+                    WebResourceError error
+            ) {
                 super.onReceivedError(view, request, error);
 
                 if (request.isForMainFrame()) {
+
                     String description =
-                            error != null && error.getDescription() != null
+                            error != null &&
+                            error.getDescription() != null
                                     ? error.getDescription().toString()
                                     : "Unknown WebView error";
 
@@ -103,11 +110,12 @@ public class MainActivity extends Activity {
             }
         });
 
-        // Chrome client: JavaScript console + microphone permission
         web.setWebChromeClient(new WebChromeClient() {
 
             @Override
-            public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
+            public boolean onConsoleMessage(
+                    ConsoleMessage consoleMessage
+            ) {
 
                 android.util.Log.d(
                         "JARVIS_WEB",
@@ -122,49 +130,79 @@ public class MainActivity extends Activity {
             }
 
             @Override
-            public void onPermissionRequest(final PermissionRequest request) {
+            public void onPermissionRequest(
+                    final PermissionRequest request
+            ) {
 
                 runOnUiThread(() -> {
 
-                    String[] resources = request.getResources();
+                    boolean needsAudio = false;
 
-                    for (String resource : resources) {
+                    for (String resource : request.getResources()) {
 
-                        if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)) {
+                        if (PermissionRequest.RESOURCE_AUDIO_CAPTURE
+                                .equals(resource)) {
 
-                            if (checkSelfPermission(
-                                    Manifest.permission.RECORD_AUDIO
-                            ) == PackageManager.PERMISSION_GRANTED) {
-
-                                request.grant(
-                                        new String[]{
-                                                PermissionRequest.RESOURCE_AUDIO_CAPTURE
-                                        }
-                                );
-
-                            } else {
-                                requestMicPermission();
-                            }
-
-                            return;
+                            needsAudio = true;
+                            break;
                         }
                     }
 
-                    request.deny();
+                    if (!needsAudio) {
+                        request.deny();
+                        return;
+                    }
+
+                    // Android permission already granted:
+                    // immediately grant microphone access to WebView.
+                    if (checkSelfPermission(
+                            Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED) {
+
+                        try {
+                            request.grant(
+                                    new String[]{
+                                            PermissionRequest
+                                                    .RESOURCE_AUDIO_CAPTURE
+                                    }
+                            );
+
+                            android.util.Log.d(
+                                    "JARVIS_WEB",
+                                    "WebView microphone permission GRANTED"
+                            );
+
+                        } catch (Exception e) {
+
+                            android.util.Log.e(
+                                    "JARVIS_WEB",
+                                    "Failed to grant WebView microphone",
+                                    e
+                            );
+                        }
+
+                    } else {
+
+                        // Remember the WebView request.
+                        pendingPermissionRequest = request;
+
+                        // Ask Android for microphone permission.
+                        requestMicPermission();
+                    }
                 });
             }
         });
 
         root.addView(
                 web,
-                new android.widget.FrameLayout.LayoutParams(
-                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
-                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+                new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
                 )
         );
 
-        // Error screen
         errorView = new TextView(this);
+
         errorView.setTextColor(Color.CYAN);
         errorView.setTextSize(14);
         errorView.setPadding(40, 60, 40, 40);
@@ -173,15 +211,15 @@ public class MainActivity extends Activity {
 
         root.addView(
                 errorView,
-                new android.widget.FrameLayout.LayoutParams(
-                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
-                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+                new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
                 )
         );
 
         setContentView(root);
 
-        // Android microphone permission
+        // Request Android microphone permission on first launch.
         if (checkSelfPermission(
                 Manifest.permission.RECORD_AUDIO
         ) != PackageManager.PERMISSION_GRANTED) {
@@ -189,8 +227,10 @@ public class MainActivity extends Activity {
             requestMicPermission();
         }
 
-        // Load the bundled React/Vite application
-        web.loadUrl("file:///android_asset/dist/index.html");
+        // Load the bundled React application.
+        web.loadUrl(
+                "file:///android_asset/dist/index.html"
+        );
     }
 
     private void requestMicPermission() {
@@ -203,6 +243,105 @@ public class MainActivity extends Activity {
                     },
                     42
             );
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode,
+            String[] permissions,
+            int[] grantResults
+    ) {
+
+        super.onRequestPermissionsResult(
+                requestCode,
+                permissions,
+                grantResults
+        );
+
+        if (requestCode != 42) {
+            return;
+        }
+
+        boolean granted =
+                grantResults.length > 0 &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED;
+
+        android.util.Log.d(
+                "JARVIS_PERMISSION",
+                "Android microphone permission: " +
+                        (granted ? "GRANTED" : "DENIED")
+        );
+
+        if (granted) {
+
+            // Android permission is now granted.
+            // Complete the pending WebView permission request.
+            if (pendingPermissionRequest != null) {
+
+                try {
+
+                    pendingPermissionRequest.grant(
+                            new String[]{
+                                    PermissionRequest
+                                            .RESOURCE_AUDIO_CAPTURE
+                            }
+                    );
+
+                    android.util.Log.d(
+                            "JARVIS_PERMISSION",
+                            "WebView microphone permission: GRANTED"
+                    );
+
+                } catch (Exception e) {
+
+                    android.util.Log.e(
+                            "JARVIS_PERMISSION",
+                            "Could not grant WebView microphone",
+                            e
+                    );
+                }
+
+                pendingPermissionRequest = null;
+            }
+
+            // Tell the React application that Android microphone
+            // permission is ready.
+            if (web != null) {
+
+                web.evaluateJavascript(
+                        "window.dispatchEvent(" +
+                        "new CustomEvent(" +
+                        "'jarvis-microphone-granted'" +
+                        ")" +
+                        ");",
+                        null
+                );
+            }
+
+        } else {
+
+            if (pendingPermissionRequest != null) {
+
+                try {
+                    pendingPermissionRequest.deny();
+                } catch (Exception ignored) {
+                }
+
+                pendingPermissionRequest = null;
+            }
+
+            if (web != null) {
+
+                web.evaluateJavascript(
+                        "window.dispatchEvent(" +
+                        "new CustomEvent(" +
+                        "'jarvis-microphone-denied'" +
+                        ")" +
+                        ");",
+                        null
+                );
+            }
         }
     }
 
@@ -224,28 +363,34 @@ public class MainActivity extends Activity {
         });
     }
 
-    public void emit(String type, String text) {
+    public void emit(
+            String type,
+            String text
+    ) {
 
         if (web == null) {
             return;
         }
 
-        String safe = text == null
-                ? ""
-                : text
-                    .replace("\\", "\\\\")
-                    .replace("'", "\\'")
-                    .replace("\n", " ")
-                    .replace("\r", " ");
+        String safe =
+                text == null
+                        ? ""
+                        : text
+                            .replace("\\", "\\\\")
+                            .replace("'", "\\'")
+                            .replace("\n", " ")
+                            .replace("\r", " ");
 
         String js =
                 "window.dispatchEvent(" +
-                "new CustomEvent('jarvis-native-event'," +
+                "new CustomEvent(" +
+                "'jarvis-native-event'," +
                 "{detail:{type:'" +
                 type +
                 "',text:'" +
                 safe +
-                "'}})" +
+                "'}}" +
+                ")" +
                 ");";
 
         runOnUiThread(() ->
@@ -288,6 +433,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+
+        pendingPermissionRequest = null;
 
         if (web != null) {
             web.destroy();
