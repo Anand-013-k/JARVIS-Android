@@ -705,20 +705,31 @@ export function useSpeechRecognition(
           trailingCommand || undefined,
         );
 
-        if (trailingCommand) {
+                if (trailingCommand) {
           onFinalTranscriptRef.current?.(
-            cleanText,
-         );  
-       },
-       [
-          logDiagnostic,
+            trailingCommand,
+          );
+        }
 
-speechDiagnostics.confidenceScore,
-         transitionPipeline,
-         updateDiagnostics,
-       ],
-    );
+        return;
+      }
 
+      transitionPipeline(
+        'PROCESSING',
+        'Final command captured.',
+      );
+
+      onFinalTranscriptRef.current?.(
+        cleanText,
+      );
+    },
+    [
+      logDiagnostic,
+      speechDiagnostics.confidenceScore,
+      transitionPipeline,
+      updateDiagnostics,
+    ],
+  );
 
          
            
