@@ -1694,7 +1694,7 @@ export function useSpeechRecognition(
           );
         }
 
-        if (event.type === 'wake') {
+                if (event.type === 'wake') {
           setIsListening(true);
           setIsWakeWordStandby(false);
           setCommandListeningActive(true);
@@ -1709,10 +1709,14 @@ export function useSpeechRecognition(
             'Android native wake phrase detected.',
             'success',
           );
-        }
 
-        if (event.type === 'command') {
-          setTranscript(event.text);
+          onWakeWordDetectedRef.current?.();
+          }
+
+                if (event.type === 'command') {
+          const commandText = event.text.trim();
+
+          setTranscript(commandText);
           setInterimTranscript('');
           setIsListening(false);
           setCommandListeningActive(false);
@@ -1720,8 +1724,8 @@ export function useSpeechRecognition(
           setAudioLevel(0);
 
           updateDiagnostics({
-            lastFinal: event.text,
-            zeroWordsCaptured: false,
+            lastFinal: commandText,
+            zeroWordsCaptured: !commandText,
           });
 
           transitionPipeline(
@@ -1731,10 +1735,14 @@ export function useSpeechRecognition(
 
           logDiagnostic(
             'native-command',
-            event.text,
+            commandText,
             'success',
           );
-        }
+
+          if (commandText) {
+            onFinalTranscriptRef.current?.(commandText);
+          }
+                }
 
         if (event.type === 'error') {
           setError(event.text);
