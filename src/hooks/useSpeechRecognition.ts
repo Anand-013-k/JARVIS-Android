@@ -1296,7 +1296,8 @@ export function useSpeechRecognition(
       );
 
       scheduleRestart(1000);
-    }, [
+    }
+  }, [
     native,
     createRecognizer,
     handleFinalResult,
