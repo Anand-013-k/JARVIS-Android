@@ -10,41 +10,486 @@ import android.os.IBinder;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
+
 import java.util.ArrayList;
 import java.util.Locale;
 
 public class JarvisSpeechService extends Service implements RecognitionListener {
-    private static final String CHANNEL="jarvis_voice";
+
+    private static final String CHANNEL = "jarvis_voice";
+    private static final int NOTIFICATION_ID = 1001;
+
     private SpeechRecognizer recognizer;
-    private String mode="wake";
-    private boolean running;
 
-    @Override public void onCreate() { super.onCreate();
-        NotificationChannel c=new NotificationChannel(CHANNEL,"JARVIS voice",NotificationManager.IMPORTANCE_LOW);
-        ((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(c);
-        Notification n=new Notification.Builder(this,CHANNEL).setContentTitle("JARVIS listening").setContentText("Voice standby is active").setSmallIcon(android.R.drawable.ic_btn_speak_now).build();
-        startForeground(1001,n);
-    }
-    @Override public int onStartCommand(Intent intent,int flags,int id){ mode=intent!=null&&intent.getAction()!=null?intent.getAction():"wake"; startRecognition(); return START_STICKY; }
-    private void startRecognition(){
-        if (recognizer!=null) try{recognizer.destroy();}catch(Exception ignored){}
-        if (!SpeechRecognizer.isRecognitionAvailable(this)){ emit("error","Android speech recognition is unavailable on this device."); return; }
-        recognizer=SpeechRecognizer.createSpeechRecognizer(this); recognizer.setRecognitionListener(this);
-        Intent i=new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH); i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,RecognizerIntent.LANGUAGE_MODEL_FREE_FORM); i.putExtra(RecognizerIntent.EXTRA_LANGUAGE,Locale.US.toLanguageTag()); i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS,true); i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS,3);
-        running=true; try{recognizer.startListening(i);}catch(Exception e){emit("error",e.getMessage());}
-    }
-    private void emit(String t,String x){ MainActivity a=MainActivity.getInstance(); if(a!=null)a.emit(t,x); }
-    private boolean wake(String s){ String x=s.toLowerCase(Locale.US).replaceAll("[^a-z ]"," ").replaceAll("\\s+"," ").trim(); return x.matches(".*\\b(hey|okay|ok|hi|hello) jarvis\\b.*"); }
-    private String afterWake(String s){ int i=s.toLowerCase(Locale.US).indexOf("jarvis"); return i>=0?s.substring(i+6).replaceFirst("^[, .!?-]+","").trim():""; }
+    private String mode = "wake";
 
-    @Override public void onResults(Bundle b){ ArrayList<String> r=b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION); String s=(r!=null&&!r.isEmpty())?r.get(0):"";
-        if(mode.equals("wake")) { if(wake(s)){ emit("wake",""); String tail=afterWake(s); mode="command"; if(!tail.isEmpty()) emit("command",tail); } }
-        else if(!s.isEmpty()) emit("command",s);
-        if(running) startRecognition();
+    private boolean running = false;
+    private boolean restarting = false;
+    private boolean wakeAlreadyDetected = false;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+
+        NotificationChannel channel = new NotificationChannel(
+                CHANNEL,
+                "JARVIS voice",
+                NotificationManager.IMPORTANCE_LOW
+        );
+
+        NotificationManager manager =
+                (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+
+        if (manager != null) {
+            manager.createNotificationChannel(channel);
+        }
+
+        Notification notification =
+                new Notification.Builder(this, CHANNEL)
+                        .setContentTitle("JARVIS listening")
+                        .setContentText("Voice standby is active")
+                        .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                        .setOngoing(true)
+                        .build();
+
+        startForeground(NOTIFICATION_ID, notification);
     }
-    @Override public void onPartialResults(Bundle b){ ArrayList<String> r=b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION); if(r!=null&&!r.isEmpty()){String s=r.get(0); if(mode.equals("wake")){if(wake(s))emit("wake","");}else emit("partial",s);} }
-    @Override public void onError(int e){ if(running){ startRecognition(); } }
-    @Override public void onReadyForSpeech(Bundle b){} @Override public void onBeginningOfSpeech(){} @Override public void onRmsChanged(float v){} @Override public void onBufferReceived(byte[] b){} @Override public void onEndOfSpeech(){} @Override public void onEvent(int a,Bundle b){}
-    @Override public void onDestroy(){running=false;if(recognizer!=null)recognizer.destroy();super.onDestroy();}
-    @Override public IBinder onBind(Intent i){return null;}
-}
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+
+        String requestedMode =
+                intent != null ? intent.getAction() : null;
+
+        if ("command".equals(requestedMode)) {
+            mode = "command";
+        } else {
+            mode = "wake";
+        }
+
+        wakeAlreadyDetected = false;
+        running = true;
+
+        startRecognition();
+
+        return START_STICKY;
+    }
+
+    private void startRecognition() {
+
+        if (!running || restarting) {
+            return;
+        }
+
+        restarting = true;
+
+        destroyRecognizer();
+
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            emit(
+                    "error",
+                    "Android speech recognition is unavailable on this device."
+            );
+
+            restarting = false;
+            return;
+        }
+
+        recognizer = SpeechRecognizer.createSpeechRecognizer(this);
+
+        if (recognizer == null) {
+            emit(
+                    "error",
+                    "Could not create Android speech recognizer."
+            );
+
+            restarting = false;
+            return;
+        }
+
+        recognizer.setRecognitionListener(this);
+
+        Intent intent =
+                new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+
+        intent.putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+        );
+
+        intent.putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE,
+                Locale.US.toLanguageTag()
+        );
+
+        intent.putExtra(
+                RecognizerIntent.EXTRA_PARTIAL_RESULTS,
+                true
+        );
+
+        intent.putExtra(
+                RecognizerIntent.EXTRA_MAX_RESULTS,
+                3
+        );
+
+        try {
+            recognizer.startListening(intent);
+        } catch (Exception e) {
+
+            emit(
+                    "error",
+                    e.getMessage() != null
+                            ? e.getMessage()
+                            : "Failed to start speech recognition."
+            );
+
+            scheduleRestart(1000);
+        }
+    }
+
+    private void scheduleRestart(long delay) {
+
+        if (!running) {
+            return;
+        }
+
+        new android.os.Handler(
+                android.os.Looper.getMainLooper()
+        ).postDelayed(() -> {
+
+            if (!running) {
+                return;
+            }
+
+            restarting = false;
+            startRecognition();
+
+        }, delay);
+    }
+
+    private void destroyRecognizer() {
+
+        if (recognizer != null) {
+
+            try {
+                recognizer.cancel();
+            } catch (Exception ignored) {
+            }
+
+            try {
+                recognizer.destroy();
+            } catch (Exception ignored) {
+            }
+
+            recognizer = null;
+        }
+    }
+
+    private void emit(String type, String text) {
+
+        MainActivity activity =
+                MainActivity.getInstance();
+
+        if (activity != null) {
+            activity.emit(
+                    type,
+                    text == null ? "" : text
+            );
+        }
+    }
+
+    private boolean containsWakeWord(String text) {
+
+        if (text == null) {
+            return false;
+        }
+
+        String normalized =
+                text.toLowerCase(Locale.US)
+                        .replaceAll("[^a-z ]", " ")
+                        .replaceAll("\\s+", " ")
+                        .trim();
+
+        return normalized.matches(
+                ".*\\b(hey|okay|ok|hi|hello) jarvis\\b.*"
+        );
+    }
+
+    private String extractCommandAfterWakeWord(String text) {
+
+        if (text == null) {
+            return "";
+        }
+
+        String normalized =
+                text.toLowerCase(Locale.US);
+
+        int jarvisIndex =
+                normalized.indexOf("jarvis");
+
+        if (jarvisIndex < 0) {
+            return "";
+        }
+
+        String command =
+                text.substring(jarvisIndex + 6);
+
+        return command
+                .replaceFirst("^[, .!?-]+", "")
+                .trim();
+    }
+
+    @Override
+    public void onReadyForSpeech(Bundle params) {
+
+        restarting = false;
+
+        emit(
+                "listening",
+                mode
+        );
+    }
+
+    @Override
+    public void onBeginningOfSpeech() {
+    }
+
+    @Override
+    public void onRmsChanged(float rmsdB) {
+    }
+
+    @Override
+    public void onBufferReceived(byte[] buffer) {
+    }
+
+    @Override
+    public void onEndOfSpeech() {
+    }
+
+    @Override
+    public void onPartialResults(Bundle bundle) {
+
+        if (!running || bundle == null) {
+            return;
+        }
+
+        ArrayList<String> results =
+                bundle.getStringArrayList(
+                        SpeechRecognizer.RESULTS_RECOGNITION
+                );
+
+        if (results == null || results.isEmpty()) {
+            return;
+        }
+
+        String text = results.get(0);
+
+        if (text == null || text.trim().isEmpty()) {
+            return;
+        }
+
+        /*
+         * Wake mode:
+         *
+         * Only use partial results to detect the wake phrase.
+         * Do NOT emit "wake" repeatedly.
+         */
+        if ("wake".equals(mode)) {
+
+            if (!wakeAlreadyDetected &&
+                    containsWakeWord(text)) {
+
+                wakeAlreadyDetected = true;
+
+                emit("wake", "");
+            }
+
+            return;
+        }
+
+        /*
+         * Command mode:
+         *
+         * Partial text is useful for UI feedback.
+         */
+        emit("partial", text);
+    }
+
+    @Override
+    public void onResults(Bundle bundle) {
+
+        if (!running || bundle == null) {
+            return;
+        }
+
+        ArrayList<String> results =
+                bundle.getStringArrayList(
+                        SpeechRecognizer.RESULTS_RECOGNITION
+                );
+
+        String text =
+                (results != null && !results.isEmpty())
+                        ? results.get(0)
+                        : "";
+
+        text = text == null ? "" : text.trim();
+
+        if ("wake".equals(mode)) {
+
+            if (containsWakeWord(text)) {
+
+                if (!wakeAlreadyDetected) {
+
+                    wakeAlreadyDetected = true;
+
+                    emit("wake", "");
+                }
+
+                String command =
+                        extractCommandAfterWakeWord(text);
+
+                /*
+                 * Example:
+                 *
+                 * "Hey JARVIS turn on Bluetooth"
+                 *
+                 * becomes:
+                 *
+                 * "turn on Bluetooth"
+                 */
+                if (!command.isEmpty()) {
+
+                    emit(
+                            "command",
+                            command
+                    );
+
+                    /*
+                     * The command has already been delivered.
+                     * Return to wake standby.
+                     */
+                    mode = "wake";
+                    wakeAlreadyDetected = false;
+
+                    scheduleRestart(500);
+
+                    return;
+                }
+
+                /*
+                 * Wake phrase without a command.
+                 *
+                 * Switch to command mode so the next
+                 * speech becomes the command.
+                 */
+                mode = "command";
+                wakeAlreadyDetected = false;
+
+                scheduleRestart(300);
+
+                return;
+            }
+
+            /*
+             * Nothing useful heard while waiting for
+             * "Hey JARVIS".
+             */
+            wakeAlreadyDetected = false;
+
+            scheduleRestart(350);
+
+            return;
+        }
+
+        /*
+         * COMMAND MODE
+         */
+        if (!text.isEmpty()) {
+
+            emit(
+                    "command",
+                    text
+            );
+        }
+
+        /*
+         * IMPORTANT:
+         *
+         * After one command, always return to wake mode.
+         */
+        mode = "wake";
+        wakeAlreadyDetected = false;
+
+        scheduleRestart(500);
+    }
+
+    @Override
+    public void onError(int error) {
+
+        if (!running) {
+            return;
+        }
+
+        String message;
+
+        switch (error) {
+
+            case SpeechRecognizer.ERROR_AUDIO:
+                message = "Audio recording error.";
+                break;
+
+            case SpeechRecognizer.ERROR_CLIENT:
+                message = "Speech recognizer client error.";
+                break;
+
+            case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS:
+                message = "Microphone permission is required.";
+                break;
+
+            case SpeechRecognizer.ERROR_NETWORK:
+                message = "Speech recognition network error.";
+                break;
+
+            case SpeechRecognizer.ERROR_NETWORK_TIMEOUT:
+                message = "Speech recognition network timeout.";
+                break;
+
+            case SpeechRecognizer.ERROR_NO_MATCH:
+                message = "No speech match.";
+                break;
+
+            case SpeechRecognizer.ERROR_RECOGNIZER_BUSY:
+                message = "Speech recognizer is busy.";
+                break;
+
+            case SpeechRecognizer.ERROR_SERVER:
+                message = "Speech recognition server error.";
+                break;
+
+            case SpeechRecognizer.ERROR_SPEECH_TIMEOUT:
+                message = "Speech input timed out.";
+                break;
+
+            default:
+                message = "Speech recognition error: " + error;
+                break;
+        }
+
+        /*
+         * NO-MATCH and SPEECH-TIMEOUT are normal during
+         * wake-word standby, so don't treat them as fatal.
+         */
+        if (error != SpeechRecognizer.ERROR_NO_MATCH &&
+                error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+
+            emit("error", message);
+        }
+
+        if (error ==
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+
+            running = false;
+            return;
+        }
+
+        schedule
