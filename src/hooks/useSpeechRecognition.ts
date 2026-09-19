@@ -1632,7 +1632,6 @@ export function useSpeechRecognition(
     preferredInputDeviceId,
     logDiagnostic,
   ]);
-
   useEffect(() => {
     if (!native) {
       return;
@@ -1642,6 +1641,113 @@ export function useSpeechRecognition(
       native.onEvent(event => {
         if (!mountedRef.current) {
           return;
+        }
+
+        if (event.type === 'listening') {
+          const nativeMode =
+            event.text === 'command'
+              ? 'command'
+              : 'wake';
+
+          modeRef.current = nativeMode;
+          setActiveModeState(nativeMode);
+          setIsListening(true);
+
+          if (nativeMode === 'wake') {
+            setIsWakeWordStandby(true);
+            setCommandListeningActive(false);
+
+            transitionPipeline(
+              'STANDBY',
+              'Android native wake standby is listening.',
+            );
+          } else {
+            setIsWakeWordStandby(false);
+            setCommandListeningActive(true);
+
+            transitionPipeline(
+              'LISTENING',
+              'Android native command recognizer is listening.',
+            );
+          }
+
+          logDiagnostic(
+            'native-listening',
+            `Android native recognizer listening in ${nativeMode} mode.`,
+            'success',
+          );
+        }
+
+        if (event.type === 'partial') {
+          setInterimTranscript(event.text);
+          setAudioLevel(0.65);
+
+          updateDiagnostics({
+            lastInterim: event.text,
+            zeroWordsCaptured: false,
+          });
+
+          logDiagnostic(
+            'native-partial',
+            event.text,
+            'info',
+          );
+        }
+
+        if (event.type === 'wake') {
+          setIsListening(true);
+          setIsWakeWordStandby(false);
+          setCommandListeningActive(true);
+
+          transitionPipeline(
+            'WAKE_DETECTED',
+            'Android native wake phrase detected.',
+          );
+
+          logDiagnostic(
+            'native-wake',
+            'Android native wake phrase detected.',
+            'success',
+          );
+        }
+
+        if (event.type === 'command') {
+          setTranscript(event.text);
+          setInterimTranscript('');
+          setIsListening(false);
+          setCommandListeningActive(false);
+          setIsWakeWordStandby(false);
+          setAudioLevel(0);
+
+          updateDiagnostics({
+            lastFinal: event.text,
+            zeroWordsCaptured: false,
+          });
+
+          transitionPipeline(
+            'PROCESSING',
+            'Android native command captured.',
+          );
+
+          logDiagnostic(
+            'native-command',
+            event.text,
+            'success',
+          );
+        }
+
+        if (event.type === 'error') {
+          setError(event.text);
+
+          updateDiagnostics({
+            exactError: event.text,
+          });
+
+          logDiagnostic(
+            'native-error',
+            event.text,
+            'error',
+          );
         }
 
         if (event.type === 'microphone-granted') {
@@ -1687,6 +1793,7 @@ export function useSpeechRecognition(
     native,
     updateDiagnostics,
     logDiagnostic,
+    transitionPipeline,
   ]);
               const logTelemetry = useCallback(
     (
