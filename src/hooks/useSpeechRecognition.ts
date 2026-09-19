@@ -185,8 +185,13 @@ function getRecognitionConstructor(): SpeechRecognitionConstructor | null {
     window.webkitSpeechRecognition ??
     null
   );
+} 
+function isAndroidNativeBridgeAvailable(): boolean {
+  return Boolean(
+    typeof window !== 'undefined' &&
+    (window as any).JARVIS_ANDROID
+  );
 }
-
 function getConstructorName(): string {
   if (typeof window === 'undefined') {
     return 'none';
@@ -742,7 +747,70 @@ export function useSpeechRecognition(
     if (isSpeaking) {
       return;
     }
+    if (native) {
+      const mode = modeRef.current;
 
+      setError(null);
+      setTranscript('');
+      setInterimTranscript('');
+      setAudioLevel(0);
+
+      if (mode === 'wake') {
+        setIsWakeWordStandby(true);
+        setCommandListeningActive(false);
+
+        transitionPipeline(
+          'STANDBY',
+          'Starting Android native wake-word standby.',
+        );
+      } else {
+        setIsWakeWordStandby(false);
+        setCommandListeningActive(true);
+
+        transitionPipeline(
+          'LISTENING',
+          'Starting Android native command listening.',
+        );
+
+        onCommandListeningStartRef.current?.();
+      }
+
+      try {
+        native.start(mode);
+
+        setIsListening(true);
+
+        logDiagnostic(
+          'native-start',
+          `Android native speech service started in ${mode} mode.`,
+          'success',
+        );
+      } catch (startError) {
+        const message =
+          startError instanceof Error
+            ? startError.message
+            : 'Unable to start Android native speech service.';
+
+        setError(message);
+
+        updateDiagnostics({
+          exactError: message,
+        });
+
+        logDiagnostic(
+          'native-start-error',
+          message,
+          'error',
+        );
+
+        transitionPipeline(
+          'STANDBY',
+          'Android native speech service failed to start.',
+        );
+      }
+
+      return;
+    }
     if (
       modeRef.current === 'wake' &&
       !wakeWordEnabledRef.current
@@ -1228,8 +1296,8 @@ export function useSpeechRecognition(
       );
 
       scheduleRestart(1000);
-    }
-  }, [
+    }, [
+    native,
     createRecognizer,
     handleFinalResult,
     incrementEvent,
