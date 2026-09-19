@@ -288,12 +288,6 @@ public class JarvisSpeechService extends Service implements RecognitionListener 
             return;
         }
 
-        /*
-         * Wake mode:
-         *
-         * Only use partial results to detect the wake phrase.
-         * Do NOT emit "wake" repeatedly.
-         */
         if ("wake".equals(mode)) {
 
             if (!wakeAlreadyDetected &&
@@ -307,11 +301,6 @@ public class JarvisSpeechService extends Service implements RecognitionListener 
             return;
         }
 
-        /*
-         * Command mode:
-         *
-         * Partial text is useful for UI feedback.
-         */
         emit("partial", text);
     }
 
@@ -348,15 +337,6 @@ public class JarvisSpeechService extends Service implements RecognitionListener 
                 String command =
                         extractCommandAfterWakeWord(text);
 
-                /*
-                 * Example:
-                 *
-                 * "Hey JARVIS turn on Bluetooth"
-                 *
-                 * becomes:
-                 *
-                 * "turn on Bluetooth"
-                 */
                 if (!command.isEmpty()) {
 
                     emit(
@@ -364,10 +344,6 @@ public class JarvisSpeechService extends Service implements RecognitionListener 
                             command
                     );
 
-                    /*
-                     * The command has already been delivered.
-                     * Return to wake standby.
-                     */
                     mode = "wake";
                     wakeAlreadyDetected = false;
 
@@ -376,12 +352,6 @@ public class JarvisSpeechService extends Service implements RecognitionListener 
                     return;
                 }
 
-                /*
-                 * Wake phrase without a command.
-                 *
-                 * Switch to command mode so the next
-                 * speech becomes the command.
-                 */
                 mode = "command";
                 wakeAlreadyDetected = false;
 
@@ -390,10 +360,6 @@ public class JarvisSpeechService extends Service implements RecognitionListener 
                 return;
             }
 
-            /*
-             * Nothing useful heard while waiting for
-             * "Hey JARVIS".
-             */
             wakeAlreadyDetected = false;
 
             scheduleRestart(350);
@@ -401,9 +367,6 @@ public class JarvisSpeechService extends Service implements RecognitionListener 
             return;
         }
 
-        /*
-         * COMMAND MODE
-         */
         if (!text.isEmpty()) {
 
             emit(
@@ -412,11 +375,6 @@ public class JarvisSpeechService extends Service implements RecognitionListener 
             );
         }
 
-        /*
-         * IMPORTANT:
-         *
-         * After one command, always return to wake mode.
-         */
         mode = "wake";
         wakeAlreadyDetected = false;
 
@@ -475,10 +433,6 @@ public class JarvisSpeechService extends Service implements RecognitionListener 
                 break;
         }
 
-        /*
-         * NO-MATCH and SPEECH-TIMEOUT are normal during
-         * wake-word standby, so don't treat them as fatal.
-         */
         if (error != SpeechRecognizer.ERROR_NO_MATCH &&
                 error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
 
