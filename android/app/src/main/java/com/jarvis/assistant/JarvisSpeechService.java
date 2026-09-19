@@ -492,4 +492,26 @@ public class JarvisSpeechService extends Service implements RecognitionListener 
             return;
         }
 
-        schedule
+        scheduleRestart(700);
+    }
+
+    @Override
+    public void onEvent(int eventType, Bundle params) {
+    }
+
+    @Override
+    public void onDestroy() {
+
+        running = false;
+        restarting = false;
+
+        destroyRecognizer();
+
+        super.onDestroy();
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+}
