@@ -439,14 +439,26 @@ public class JarvisSpeechService extends Service implements RecognitionListener 
             emit("error", message);
         }
 
-        if (error ==
-                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+if (error ==
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
 
-            running = false;
-            return;
-        }
+    running = false;
+    return;
+}
 
-        scheduleRestart(700);
+if (error ==
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+
+    restarting = false;
+
+    destroyRecognizer();
+
+    scheduleRestart(1500);
+
+    return;
+}
+
+scheduleRestart(1000);
     }
 
     @Override
